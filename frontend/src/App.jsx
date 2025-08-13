@@ -1,22 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 
 /**
- * App.jsx
- * Beginner-friendly React code for your Marvel Release Tracker MVP.
- * - "Sync current month" calls POST /api/marvel/sync to fetch & cache releases.
- * - A Wednesday picker calls GET /api/comics/week?wed=YYYY-MM-DD.
- * - Search calls GET /api/comics/search?q=term.
- * - Clicking a result opens a modal which calls GET /api/comics/{id}.
+ * App.jsx — Marvel Release Tracker (MVP)
+ * - "Sync current month" -> POST /api/marvel/sync
+ * - Wednesday picker -> GET /api/comics/week?wed=YYYY-MM-DD
+ * - Search -> GET /api/comics/search?q=term
+ * - Click a result -> GET /api/comics/{id} in a modal
+ * - Optional "Single issues only" filter on the client
  *
- * Notes:
- * - Uses fetch (no axios needed).
- * - Works with the Vite proxy in vite.config.js so /api -> http://127.0.0.1:8000
- * - Highlights the active row via activeId (so ESLint doesn’t warn).
+ * Works with Vite proxy:
+ *   server: { proxy: { '/api': 'http://127.0.0.1:8000' } }
  */
 
 /* ----------------------- Small helpers ----------------------- */
 
-// Format Date as YYYY-MM-DD (what our API expects)
+// Format Date as YYYY-MM-DD (what the API expects)
 function fmt(d) {
   return d.toISOString().slice(0, 10)
 }
@@ -24,15 +22,13 @@ function fmt(d) {
 // Return all Wednesdays for the current month
 function getWednesdaysForMonth(d = new Date()) {
   const year = d.getFullYear()
-  const month = d.getMonth() // 0..11
+  const month = d.getMonth()
   const first = new Date(year, month, 1)
   const nextMonth = new Date(year, month + 1, 1)
   const weds = []
-
   // find first Wednesday (0=Sun..3=Wed)
   const offset = (3 - first.getDay() + 7) % 7
   let cur = new Date(year, month, 1 + offset)
-
   while (cur < nextMonth) {
     weds.push(new Date(cur))
     cur.setDate(cur.getDate() + 7)
@@ -94,10 +90,11 @@ export default function App() {
   const [open, setOpen] = useState(false)
   const [activeId, setActiveId] = useState(null)   // used for row highlight
   const [active, setActive] = useState(null)       // details data for modal
+  const [singleOnly, setSingleOnly] = useState(true)
 
   const wednesdays = useMemo(() => getWednesdaysForMonth(new Date()), [])
 
-  // On first load, auto-load the first Wednesday of this month (if available)
+  // Initial load: first Wednesday of the month
   useEffect(() => {
     async function loadInitial() {
       if (!wednesdays.length) return
@@ -126,7 +123,7 @@ export default function App() {
     try {
       const data = await searchComics(q)
       setResults(data)
-      setSelectedWed('') // clear week selection when searching by term
+      setSelectedWed('') // clear week selection when searching
     } catch (e) {
       setError(e.message)
     } finally {
@@ -153,7 +150,7 @@ export default function App() {
   async function openDetails(id) {
     setActiveId(id)
     setOpen(true)
-    setActive(null) // show "Loading…" state in modal
+    setActive(null) // show "Loading..." in modal
     try {
       const data = await getComic(id)
       setActive(data)
@@ -169,7 +166,7 @@ export default function App() {
     setLoading(true); setError('')
     try {
       await syncMonth(start, end)
-      // After syncing, reload currently selected week (or first Wednesday)
+      // After syncing, reload selected (or first) Wednesday
       const iso = selectedWed || (wednesdays[0] ? fmt(wednesdays[0]) : '')
       if (iso) {
         const data = await getComicsByWeek(iso)
@@ -190,6 +187,17 @@ export default function App() {
     setError('')
     setActiveId(null)
   }
+
+  // Client-side filter for single issues
+  const filtered = singleOnly
+    ? results.filter(c => {
+        const f = (c.format || '').toLowerCase()
+        // keep common "single issue" formats, hide collections
+        const isComic = f.includes('comic')
+        const isCollection = f.includes('collection') || f.includes('trade') || f.includes('hardcover') || f.includes('omnibus')
+        return isComic && !isCollection
+      })
+    : results
 
   /* ---------- UI ---------- */
 
@@ -212,7 +220,7 @@ export default function App() {
         </form>
 
         {/* Wednesday picker + actions */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span>Pick a Wednesday:</span>
             <select
@@ -229,6 +237,11 @@ export default function App() {
             </select>
           </label>
 
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={singleOnly} onChange={(e) => setSingleOnly(e.target.checked)} />
+            Single issues only
+          </label>
+
           <button type="button" onClick={syncCurrentMonth} style={{ padding: '10px 12px', borderRadius: 10 }}>
             Sync current month
           </button>
@@ -241,11 +254,11 @@ export default function App() {
         {/* Status */}
         {loading && <p>Loading…</p>}
         {error && <p role="alert" style={{ color: 'crimson' }}>Error: {error}</p>}
-        {!loading && results.length === 0 && <p>No results yet. Try a search or pick a Wednesday.</p>}
+        {!loading && filtered.length === 0 && <p>No results yet. Try a search or pick a Wednesday.</p>}
 
         {/* Results */}
         <ul style={{ listStyle: 'none', padding: 0 }}>
-          {results.map((c) => (
+          {filtered.map((c) => (
             <li
               key={c.id}
               onClick={() => openDetails(c.id)}
