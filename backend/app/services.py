@@ -1,47 +1,63 @@
-from datetime import datetime
-from typing import List, Tuple
+# backend/app/services.py
+from typing import Tuple
+from datetime import date
 from sqlmodel import Session, select
 from .db import engine
 from .models import Comic
-from .marvel_client import fetch_comics_by_date_range
-from datetime import date
-from typing import Optional
+from .marvel_client import fetch_comics_by_date_range, build_thumbnail_url, pick_description
 
-def _parse_onsale_date(dates: list) -> Optional[date]:
+def _parse_onsale_date(dates: list) -> date | None:
     """
-    Marvel 'onsaleDate' strings often end with offsets like '-0400' (no colon),
-    which breaks datetime.fromisoformat. For our needs, we only need the date.
-    Safest approach: take the first 10 characters 'YYYY-MM-DD'.
+    Safely parse Marvel 'onsaleDate' strings. We only need YYYY-MM-DD,
+    so slice the first 10 chars to avoid timezone/offset issues.
     """
-    for item in dates or []:
+    for item in (dates or []):
         if item.get("type") == "onsaleDate" and item.get("date"):
             s = str(item["date"])
             if len(s) >= 10:
-                ymd = s[:10]
                 try:
-                    y, m, d = map(int, ymd.split("-"))
+                    y, m, d = map(int, s[:10].split("-"))
                     return date(y, m, d)
                 except Exception:
                     return None
     return None
 
-def _first_creator(creators: dict, role: str) -> str | None:
-    for c in (creators or {}).get("items", []):
-        if c.get("role") == role:
-            return c.get("name")
-    return None
-
-def _thumb_url(thumbnail: dict) -> str | None:
-    if not thumbnail: return None
-    path, ext = thumbnail.get("path"), thumbnail.get("extension")
-    if not path or not ext: return None
-    # Marvel allows variants like /portrait_xlarge, /standard_fantastic, etc.
-    return f"{path}/portrait_xlarge.{ext}"
-
-def sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool=False) -> tuple[int,int]:
+def _map_marvel_to_comic(row: dict) -> Tuple[dict, int]:
     """
-    Fetches all comics in [start_iso, end_iso] and upserts them into SQLite.
-    Returns (inserted_count, updated_count).
+    Convert a Marvel API comic dict -> fields for our Comic model and the marvel_id.
+    """
+    mid = row.get("id")
+    title = row.get("title") or ""
+    author = None
+    # Pull first creator of type "writer" if available
+    creators = ((row.get("creators") or {}).get("items")) or []
+    for c in creators:
+        if (c.get("role") or "").lower() == "writer":
+            author = c.get("name")
+            break
+
+    onsale = _parse_onsale_date(row.get("dates") or [])
+    fmt = row.get("format")  # e.g., "Comic", "Trade Paperback"
+    thumb = build_thumbnail_url(row, variant="portrait_uncanny")
+    desc = pick_description(row)
+    issue_number = row.get("issueNumber")
+
+    data = {
+        "title": title,
+        "author": author,
+        "onsale_date": onsale,
+        "format": fmt,
+        "thumbnail_url": thumb,
+        "description": desc,
+        "issue_number": issue_number,
+        "marvel_id": mid,
+    }
+    return data, mid
+
+def sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool = False) -> Tuple[int, int]:
+    """
+    Pulls all comics in [start_iso, end_iso] from Marvel and upserts them by marvel_id.
+    Returns (inserted, updated).
     """
     inserted = updated = 0
     offset = 0
@@ -50,50 +66,27 @@ def sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool=Fal
     with Session(engine) as session:
         while True:
             payload = fetch_comics_by_date_range(start_iso, end_iso, limit=limit, offset=offset, include_collections=include_collections)
-            data = payload.get("data", {})
-            results = data.get("results", []) or []
-            total = data.get("total", 0)
-            count = data.get("count", 0)
+            data = (payload or {}).get("data") or {}
+            results = data.get("results") or []
+            total = data.get("total") or 0
 
             for item in results:
-                mid = item.get("id")
-                title = item.get("title")
-                issue_number = item.get("issueNumber")
-                desc = item.get("description")
-                onsale = _parse_onsale_date(item.get("dates"))
-                fmt = item.get("format")
-                thumb = _thumb_url(item.get("thumbnail"))
-                # pick a "writer" if available; fallback to first listed creator
-                writer = _first_creator(item.get("creators"), "writer") or _first_creator(item.get("creators"), "editor") or None
-
+                doc, mid = _map_marvel_to_comic(item)
+                if not mid:
+                    continue
                 existing = session.exec(select(Comic).where(Comic.marvel_id == mid)).first()
                 if existing:
-                    # update
-                    existing.title = title or existing.title
-                    existing.issue_number = issue_number or existing.issue_number
-                    existing.description = desc or existing.description
-                    existing.onsale_date = onsale or existing.onsale_date
-                    existing.format = fmt or existing.format
-                    existing.thumbnail_url = thumb or existing.thumbnail_url
-                    existing.author = writer or existing.author
+                    # Update fields (overwrite with latest)
+                    for k, v in doc.items():
+                        setattr(existing, k, v)
                     updated += 1
                 else:
-                    session.add(Comic(
-                        marvel_id=mid,
-                        title=title or "Untitled",
-                        issue_number=issue_number,
-                        description=desc,
-                        onsale_date=onsale,
-                        format=fmt,
-                        thumbnail_url=thumb,
-                        author=writer,
-                    ))
+                    session.add(Comic(**doc))
                     inserted += 1
 
             session.commit()
-
-            if offset + count >= total or count == 0:
+            offset += limit
+            if offset >= total:
                 break
-            offset += count
 
     return inserted, updated

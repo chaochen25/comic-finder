@@ -1,12 +1,10 @@
-from datetime import date
 from typing import Optional
-from sqlmodel import SQLModel, Field, UniqueConstraint
+from datetime import date
+from sqlmodel import SQLModel, Field
 
 class Comic(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("marvel_id", name="uq_comic_marvel_id"),)
-
     id: Optional[int] = Field(default=None, primary_key=True)
-    marvel_id: Optional[int] = None 
+    marvel_id: Optional[int] = Field(default=None, index=True, unique=True)
     title: str
     author: Optional[str] = None
     onsale_date: Optional[date] = None
