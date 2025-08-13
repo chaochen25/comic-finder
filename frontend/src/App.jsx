@@ -1,320 +1,338 @@
+// frontend/src/App.jsx
 import { useEffect, useMemo, useState } from 'react'
 
-/**
- * App.jsx — Marvel Release Tracker (MVP)
- * - "Sync current month" -> POST /api/marvel/sync
- * - Wednesday picker -> GET /api/comics/week?wed=YYYY-MM-DD
- * - Search -> GET /api/comics/search?q=term
- * - Click a result -> GET /api/comics/{id} in a modal
- * - Optional "Single issues only" filter on the client
- *
- * Works with Vite proxy:
- *   server: { proxy: { '/api': 'http://127.0.0.1:8000' } }
- */
-
-/* ----------------------- Small helpers ----------------------- */
-
-// Format Date as YYYY-MM-DD (what the API expects)
-function fmt(d) {
-  return d.toISOString().slice(0, 10)
-}
-
-// Return all Wednesdays for the current month
-function getWednesdaysForMonth(d = new Date()) {
-  const year = d.getFullYear()
-  const month = d.getMonth()
-  const first = new Date(year, month, 1)
-  const nextMonth = new Date(year, month + 1, 1)
-  const weds = []
-  // find first Wednesday (0=Sun..3=Wed)
-  const offset = (3 - first.getDay() + 7) % 7
-  let cur = new Date(year, month, 1 + offset)
-  while (cur < nextMonth) {
-    weds.push(new Date(cur))
-    cur.setDate(cur.getDate() + 7)
-  }
-  return weds
-}
-
-/* ----------------------- Tiny API layer ----------------------- */
-
+/** Basic fetch helpers for the FastAPI backend */
 async function apiGet(path) {
   const res = await fetch(path)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 140)}` : ''}`)
+  }
   return res.json()
 }
 async function apiPost(path) {
   const res = await fetch(path, { method: 'POST' })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res.json()
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 140)}` : ''}`)
+  }
+  return res.json().catch(() => ({}))
 }
 
-const getComicsByWeek = (isoWed) => apiGet(`/api/comics/week?wed=${isoWed}`)
-const searchComics = (q) => apiGet(`/api/comics/search?q=${encodeURIComponent(q)}`)
-const getComic = (id) => apiGet(`/api/comics/${id}`)
-const syncMonth = (start, end) => apiPost(`/api/marvel/sync?start=${start}&end=${end}`)
-
-/* ----------------------- Minimal Modal ----------------------- */
-
-function Modal({ open, onClose, children }) {
-  if (!open) return null
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)',
-        display: 'grid', placeItems: 'center', padding: 16, zIndex: 1000
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ background: 'white', color: 'black', maxWidth: 720, width: '100%', borderRadius: 12, padding: 16 }}
-      >
-        <button onClick={onClose} aria-label="Close" style={{ float: 'right', fontSize: 18 }}>✕</button>
-        {children}
-      </div>
-    </div>
-  )
+/** Utils */
+function ymd(d) {
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
 }
-
-/* ----------------------- Main App ----------------------- */
+function toWednesday(d) {
+  const copy = new Date(d)
+  const delta = (3 - copy.getDay() + 7) % 7 // 3 = Wed
+  copy.setDate(copy.getDate() + delta)
+  return copy
+}
+function niceLabel(d) {
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+}
+function wednesdayOptions(selected) {
+  const base = toWednesday(selected ?? new Date())
+  const out = []
+  for (let i = -4; i <= 7; i++) {
+    const d = new Date(base)
+    d.setDate(d.getDate() + i * 7)
+    out.push({ value: ymd(d), label: niceLabel(d) })
+  }
+  return out
+}
+const stripHtml = (html) =>
+  typeof html === 'string' ? html.replace(/<[^>]*>/g, '').trim() : ''
 
 export default function App() {
   const [q, setQ] = useState('')
-  const [selectedWed, setSelectedWed] = useState('')
+  const [selectedWed, setSelectedWed] = useState(() => ymd(toWednesday(new Date())))
   const [results, setResults] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
-  const [activeId, setActiveId] = useState(null)   // used for row highlight
-  const [active, setActive] = useState(null)       // details data for modal
-  const [singleOnly, setSingleOnly] = useState(true)
+  const [active, setActive] = useState(null) // modal comic
 
-  const wednesdays = useMemo(() => getWednesdaysForMonth(new Date()), [])
+  // pagination
+  const [page, setPage] = useState(1)
+  const ITEMS_PER_PAGE = 12
+  const pageCount = Math.max(1, Math.ceil(results.length / ITEMS_PER_PAGE))
+  const paginatedResults = useMemo(() => {
+    const start = (page - 1) * ITEMS_PER_PAGE
+    return results.slice(start, start + ITEMS_PER_PAGE)
+  }, [results, page])
 
-  // Initial load: first Wednesday of the month
+  const wedOptions = useMemo(() => wednesdayOptions(new Date(selectedWed)), [selectedWed])
+
+  // Reset page to 1 any time the result set changes
+  useEffect(() => { setPage(1) }, [results])
+
   useEffect(() => {
-    async function loadInitial() {
-      if (!wednesdays.length) return
-      const iso = fmt(wednesdays[0])
-      setSelectedWed(iso)
-      setLoading(true); setError('')
+    let cancelled = false
+    async function run() {
+      setLoading(true)
+      setError('')
       try {
-        const data = await getComicsByWeek(iso)
-        setResults(data)
+        const data = await apiGet(`/api/comics/week?wed=${selectedWed}`)
+        if (!cancelled) setResults(data || [])
       } catch (e) {
-        setError(e.message)
+        if (!cancelled) setError(e.message || 'Failed to load comics')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
-    loadInitial()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    run()
+    return () => { cancelled = true }
+  }, [selectedWed])
 
-  /* ---------- handlers ---------- */
-
-  async function onSearch(e) {
-    e.preventDefault()
-    if (!q.trim()) return
-    setLoading(true); setError('')
+  async function doSearch(ev) {
+    ev?.preventDefault?.()
+    setError('')
+    setLoading(true)
     try {
-      const data = await searchComics(q)
-      setResults(data)
-      setSelectedWed('') // clear week selection when searching
+      const term = q.trim()
+      if (!term) {
+        const data = await apiGet(`/api/comics/week?wed=${selectedWed}`)
+        setResults(data || [])
+        return
+      }
+      const data = await apiGet(`/api/comics/search?q=${encodeURIComponent(term)}`)
+      setResults(data || [])
     } catch (e) {
       setError(e.message)
     } finally {
       setLoading(false)
-    }
-  }
-
-  async function onPickWednesday(e) {
-    const iso = e.target.value
-    setSelectedWed(iso)
-    if (!iso) return
-    setLoading(true); setError('')
-    try {
-      const data = await getComicsByWeek(iso)
-      setResults(data)
-      setQ('') // clear text search when choosing a week
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function openDetails(id) {
-    setActiveId(id)
-    setOpen(true)
-    setActive(null) // show "Loading..." in modal
-    try {
-      const data = await getComic(id)
-      setActive(data)
-    } catch (e) {
-      setActive({ title: 'Error', description: e.message })
+      setPage(1)
     }
   }
 
   async function syncCurrentMonth() {
-    const d = new Date()
-    const start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10)
-    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().slice(0, 10)
-    setLoading(true); setError('')
+    setError('')
+    setLoading(true)
     try {
-      await syncMonth(start, end)
-      // After syncing, reload selected (or first) Wednesday
-      const iso = selectedWed || (wednesdays[0] ? fmt(wednesdays[0]) : '')
-      if (iso) {
-        const data = await getComicsByWeek(iso)
-        setSelectedWed(iso)
-        setResults(data)
+      const d = new Date(selectedWed)
+      const start = new Date(d.getFullYear(), d.getMonth(), 1)
+      const end = new Date(d.getFullYear(), d.getMonth() + 1, 0)
+      const startStr = ymd(start)
+      const endStr = ymd(end)
+
+      // ComicVine sync
+      const summary = await apiPost(`/api/cv/sync?start=${startStr}&end=${endStr}`)
+
+      // Refresh week
+      const week = await apiGet(`/api/comics/week?wed=${selectedWed}`)
+      setResults(week || [])
+      setPage(1)
+
+      if (summary && (summary.inserted !== undefined || summary.updated !== undefined)) {
+        alert(`Synced ${startStr}..${endStr}\nInserted: ${summary.inserted ?? 0}\nUpdated: ${summary.updated ?? 0}`)
       }
     } catch (e) {
-      setError(e.message)
+      setError(e.message || 'Sync failed')
     } finally {
       setLoading(false)
     }
   }
 
-  function clearFilters() {
-    setQ('')
-    setSelectedWed('')
-    setResults([])
-    setError('')
-    setActiveId(null)
+  function openModal(c) {
+    setActive(c)
+    setOpen(true)
+  }
+  function closeModal() {
+    setOpen(false)
+    setActive(null)
   }
 
-  // Client-side filter for single issues
-  const filtered = singleOnly
-    ? results.filter(c => {
-        const f = (c.format || '').toLowerCase()
-        // keep common "single issue" formats, hide collections
-        const isComic = f.includes('comic')
-        const isCollection = f.includes('collection') || f.includes('trade') || f.includes('hardcover') || f.includes('omnibus')
-        return isComic && !isCollection
-      })
-    : results
-
-  /* ---------- UI ---------- */
-
   return (
-    <div className="container" style={{ maxWidth: 920, margin: '40px auto', padding: '0 16px', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif' }}>
-      <h1>Marvel Comic Release Tracker (MVP)</h1>
-
-      {/* Controls card */}
-      <div className="card" style={{ background: 'rgba(0,0,0,0.03)', padding: 16, borderRadius: 14, display: 'grid', gap: 12 }}>
-        {/* Search */}
-        <form onSubmit={onSearch} style={{ display: 'flex', gap: 8 }}>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search titles (e.g., Avengers)…"
-            aria-label="Search by title"
-            style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #ccc', flex: 1 }}
-          />
-          <button type="submit" style={{ padding: '10px 12px', borderRadius: 10 }}>Search</button>
-        </form>
-
-        {/* Wednesday picker + actions */}
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span>Pick a Wednesday:</span>
-            <select
-              value={selectedWed}
-              onChange={onPickWednesday}
-              style={{ padding: '10px 12px', borderRadius: 10, border: '1px solid #ccc' }}
-            >
-              <option value="">— choose —</option>
-              {wednesdays.map((d) => {
-                const iso = fmt(d)
-                const human = d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })
-                return <option key={iso} value={iso}>{human}</option>
-              })}
-            </select>
-          </label>
-
-          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <input type="checkbox" checked={singleOnly} onChange={(e) => setSingleOnly(e.target.checked)} />
-            Single issues only
-          </label>
-
-          <button type="button" onClick={syncCurrentMonth} style={{ padding: '10px 12px', borderRadius: 10 }}>
+    <div style={{ fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif', padding: 20, maxWidth: 1100, margin: '0 auto' }}>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <h1 style={{ fontSize: 22, margin: 0 }}>Comic Finder</h1>
+        <span style={{ opacity: 0.6 }}>•</span>
+        <span style={{ opacity: 0.8 }}>Backend: ComicVine</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button
+            onClick={syncCurrentMonth}
+            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#f7f7f7', cursor: 'pointer' }}
+            title="Pull covers & descriptions for this month"
+          >
             Sync current month
           </button>
+        </div>
+      </header>
 
-          <button type="button" onClick={clearFilters} style={{ padding: '10px 12px', borderRadius: 10 }}>
-            Clear
+      {/* Controls */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+        {/* Search */}
+        <form onSubmit={doSearch} style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="text"
+            placeholder="Search by title (e.g., Avengers)"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc' }}
+          />
+          <button type="submit" style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}>
+            Search
+          </button>
+        </form>
+
+        {/* Wednesday picker */}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select
+            value={selectedWed}
+            onChange={(e) => setSelectedWed(e.target.value)}
+            style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc' }}
+            aria-label="Pick a Wednesday"
+          >
+            {wedOptions.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          <button
+            onClick={() => setSelectedWed(ymd(new Date(new Date(selectedWed).getTime() - 7 * 24 * 3600 * 1000)))}
+            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}
+            title="Previous week"
+          >
+            ⟵
+          </button>
+          <button
+            onClick={() => setSelectedWed(ymd(new Date(new Date(selectedWed).getTime() + 7 * 24 * 3600 * 1000)))}
+            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}
+            title="Next week"
+          >
+            ⟶
           </button>
         </div>
-
-        {/* Status */}
-        {loading && <p>Loading…</p>}
-        {error && <p role="alert" style={{ color: 'crimson' }}>Error: {error}</p>}
-        {!loading && filtered.length === 0 && <p>No results yet. Try a search or pick a Wednesday.</p>}
-
-        {/* Results */}
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          {filtered.map((c) => (
-            <li
-              key={c.id}
-              onClick={() => openDetails(c.id)}
-              aria-selected={c.id === activeId}
-              style={{
-                marginBottom: 12,
-                display: 'grid',
-                gridTemplateColumns: '80px 1fr',
-                gap: 12,
-                alignItems: 'start',
-                cursor: 'pointer',
-                background: c.id === activeId ? '#eef' : 'transparent',
-                borderRadius: 10,
-                padding: 6
-              }}
-            >
-              {c.thumbnail_url
-                ? <img src={c.thumbnail_url} alt={`${c.title} cover`} width={80} height={120} style={{ borderRadius: 8, objectFit: 'cover' }} />
-                : <div style={{ width: 80, height: 120, borderRadius: 8, background: '#eee' }} />
-              }
-              <div>
-                <div style={{ fontWeight: 700 }}>{c.title}</div>
-                <div style={{ opacity: 0.8, margin: '2px 0' }}>
-                  {c.author ? <em>{c.author}</em> : '—'}
-                  {c.onsale_date ? <> • {new Date(c.onsale_date).toLocaleDateString()}</> : null}
-                  {c.format ? <> • {c.format}</> : null}
-                </div>
-                {c.description && <p style={{ marginTop: 6 }}>{c.description}</p>}
-              </div>
-            </li>
-          ))}
-        </ul>
       </div>
 
-      {/* Details Modal */}
-      <Modal open={open} onClose={() => { setOpen(false); setActiveId(null) }}>
-        {!active && <p>Loading…</p>}
-        {active && (
-          <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 12 }}>
-            {active.thumbnail_url
-              ? <img src={active.thumbnail_url} alt={`${active.title} cover`} width={120} height={180} style={{ borderRadius: 8, objectFit: 'cover' }} />
-              : <div style={{ width: 120, height: 180, borderRadius: 8, background: '#eee' }} />
-            }
-            <div>
-              <h2 style={{ margin: 0 }}>{active.title}</h2>
-              <p style={{ margin: '4px 0', opacity: .9 }}>
-                {active.author ? <em>{active.author}</em> : '—'}
-                {active.onsale_date ? <> • {new Date(active.onsale_date).toLocaleDateString()}</> : null}
-                {active.format ? <> • {active.format}</> : null}
-                {typeof active.issue_number === 'number' ? <> • #{active.issue_number}</> : null}
-              </p>
-              {active.description && <p style={{ marginTop: 8 }}>{active.description}</p>}
+      {/* Status */}
+      {loading && <div style={{ marginBottom: 12, color: '#555' }}>Loading…</div>}
+      {error && <div style={{ marginBottom: 12, color: '#b00020' }}>Error: {error}</div>}
+
+      {/* Results grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12, minHeight: 200 }}>
+        {paginatedResults.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => openModal(c)}
+            style={{
+              textAlign: 'left',
+              display: 'grid',
+              gridTemplateColumns: '80px 1fr',
+              gap: 12,
+              padding: 12,
+              borderRadius: 12,
+              border: '1px solid #e5e7eb',
+              background: '#fff',
+              cursor: 'pointer',
+            }}
+          >
+            {c.thumbnail_url ? (
+              <img
+                src={c.thumbnail_url}
+                alt={`${c.title} cover`}
+                width={80}
+                height={120}
+                style={{ borderRadius: 8, objectFit: 'cover' }}
+                onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
+              />
+            ) : (
+              <div style={{ width: 80, height: 120, background: '#eee', borderRadius: 8 }} />
+            )}
+
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ fontWeight: 600 }}>{c.title || 'Untitled'}</div>
+              <div style={{ fontSize: 12, color: '#555' }}>
+                {c.onsale_date ? `On sale: ${c.onsale_date}` : 'On sale: —'}
+              </div>
+              <div style={{ fontSize: 12, color: '#6b7280' }}>
+                {c.format || 'Comic'}
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* Pagination controls */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 6, marginTop: 16 }}>
+        {Array.from({ length: pageCount }, (_, i) => {
+          const p = i + 1
+          const active = p === page
+          return (
+            <button
+              key={p}
+              onClick={() => setPage(p)}
+              style={{
+                padding: '8px 12px',
+                borderRadius: 8,
+                border: `1px solid ${active ? '#7c3aed' : '#ddd'}`,
+                background: active ? '#f5f3ff' : '#fafafa',
+                cursor: 'pointer',
+                fontWeight: active ? 600 : 400
+              }}
+              aria-current={active ? 'page' : undefined}
+            >
+              {p}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Modal */}
+      {open && active && (
+        <div
+          onClick={closeModal}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 50
+          }}
+          aria-modal="true"
+          role="dialog"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 12, maxWidth: 720, width: '100%', padding: 20, boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 16 }}>
+              {active.thumbnail_url ? (
+                <img
+                  src={active.thumbnail_url}
+                  alt={`${active.title} cover`}
+                  width={120}
+                  height={180}
+                  style={{ borderRadius: 8, objectFit: 'cover' }}
+                />
+              ) : (
+                <div style={{ width: 120, height: 180, background: '#eee', borderRadius: 8 }} />
+              )}
+
+              <div>
+                <h2 style={{ margin: '0 0 6px' }}>{active.title || 'Untitled'}</h2>
+                <div style={{ fontSize: 14, color: '#555', marginBottom: 12 }}>
+                  {active.onsale_date ? `On sale: ${active.onsale_date}` : ''} {active.format ? `• ${active.format}` : ''}
+                </div>
+                <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                  {stripHtml(active.description) || 'No description provided.'}
+                </p>
+              </div>
+            </div>
+
+            <div style={{ textAlign: 'right', marginTop: 16 }}>
+              <button onClick={closeModal} style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}>
+                Close
+              </button>
             </div>
           </div>
-        )}
-      </Modal>
+        </div>
+      )}
+
+      <footer style={{ marginTop: 24, fontSize: 12, color: '#6b7280' }}>
+        Tip: If a week looks empty, click <b>Sync current month</b> first, then re‑select your Wednesday.
+      </footer>
     </div>
   )
 }

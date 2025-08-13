@@ -22,10 +22,13 @@ from fastapi import FastAPI, Query, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select
-
+from .config import MARVEL_PUBLIC_KEY as PUB, MARVEL_PRIVATE_KEY as PRI, MARVEL_BASE_URL as BASE_URL
 from .db import engine, init_db
 from .models import Comic
 from .services import sync_range_to_db
+from .services import cv_sync_range_to_db 
+from .config import COMICVINE_API_KEY, COMICVINE_BASE_URL
+
 
 
 # --------------------------- FastAPI app + CORS ---------------------------
@@ -163,3 +166,31 @@ def marvel_sync(
 
     inserted, updated = sync_range_to_db(start_date.isoformat(), end_date.isoformat(), include_collections=include_collections)
     return {"inserted": inserted, "updated": updated}
+
+@app.post("/api/cv/sync")
+def cv_sync(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    include_collections: bool = Query(False, description="(Ignored for ComicVine issues; kept for parity)"),
+) -> dict:
+    start_date = _parse_iso_date(start)
+    end_date = _parse_iso_date(end)
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="'end' must be >= 'start'")
+    inserted, updated = cv_sync_range_to_db(start_date.isoformat(), end_date.isoformat(), include_collections=include_collections)
+    return {"inserted": inserted, "updated": updated}
+
+
+@app.get("/api/debug/env")
+def debug_env():
+    def mask(s):
+        if not s: return None
+        s = s.strip()
+        return f"{s[:4]}...{s[-4:]} (len={len(s)})"
+    return {
+        "PUB_present": bool(MARVEL_PUBLIC_KEY),
+        "PRI_present": bool(MARVEL_PRIVATE_KEY),
+        "PUB_masked": mask(MARVEL_PUBLIC_KEY),
+        "PRI_masked": mask(MARVEL_PRIVATE_KEY),
+        "BASE_URL": MARVEL_BASE_URL,
+    }
