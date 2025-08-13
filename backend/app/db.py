@@ -8,5 +8,5 @@ from .config import DATABASE_URL
 engine = create_engine(DATABASE_URL, echo=True)
 
 def init_db() -> None:
-    # reate database tables if they don't already exist
+    # create database tables if they don't already exist
     SQLModel.metadata.create_all(engine)

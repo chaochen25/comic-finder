@@ -1,5 +1,4 @@
 """
-main.py
 React server can call the API from a different port: 
 - /api/health route for checks
 - A /api/comics/search route
@@ -38,7 +37,7 @@ def health():
     return {"status": "ok"}
 
 class ComicOut(BaseModel):
-    """Pydantic schema for API responses (keeps output shape stable)."""
+    """Pydantic schema for API responses."""
     id: int
     title: str
     author: Optional[str] = None
@@ -78,3 +77,43 @@ def list_comics(
             statement = statement.where(Comic.onsale_date <= end)
         results = session.exec(statement).all()
         return results
+
+from fastapi import HTTPException
+from datetime import timedelta
+from .services import sync_range_to_db
+from fastapi import HTTPException, Path
+
+@app.get("/api/comics/{comic_id}", response_model=ComicOut)
+def get_comic(comic_id: int = Path(..., ge=1)):
+    with Session(engine) as session:
+        row = session.get(Comic, comic_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Comic not found")
+        return row
+
+def wednesday_week_range(wed: date) -> tuple[date, date]:
+    start = wed
+    end = wed + timedelta(days=6)  # Wed..Tue
+    return start, end
+
+@app.post("/api/marvel/sync")
+def marvel_sync(start: date, end: date, include_collections: bool = False):
+    """
+    Server-side sync from Marvel into our DB (safe: keeps your private key hidden).
+    Example call:
+      POST /api/marvel/sync?start=2025-08-01&end=2025-08-31
+    """
+    if end < start:
+        raise HTTPException(status_code=400, detail="end must be >= start")
+    inserted, updated = sync_range_to_db(start.isoformat(), end.isoformat(), include_collections=include_collections)
+    return {"inserted": inserted, "updated": updated}
+
+@app.get("/api/comics/week", response_model=List[ComicOut])
+def comics_by_wednesday(wed: date):
+    """
+    Returns comics for the Wed..Tue window containing 'wed'.
+    """
+    start, end = wednesday_week_range(wed)
+    with Session(engine) as session:
+        stmt = select(Comic).where(Comic.onsale_date >= start, Comic.onsale_date <= end).order_by(Comic.onsale_date)
+        return session.exec(stmt).all()
