@@ -34,7 +34,6 @@ uvicorn app.main:app --reload --port 8000  # http://127.0.0.1:8000/docs
 
 # Frontend (Terminal B)
 cd ../frontend
-# (optional) nvm use will read .nvmrc
 nvm use 22
 npm install
 npm run dev  # http://localhost:5173
