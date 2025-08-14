@@ -1,4 +1,4 @@
-# backend/app/comicvine_client.py
+#comicvine_client.py
 from __future__ import annotations
 import os
 import time
@@ -8,15 +8,17 @@ import requests
 
 from .config import CV_API_KEY, CV_BASE_URL
 
+#user agent to help identify api requests to ComicVine api
 UA = "comic-finder/1.0 (+student project)"
-
+#error exceptions
 class CVError(RuntimeError):
     pass
-
+#checks if api keys are missing
 def _assert_key() -> None:
     if not CV_API_KEY:
         raise CVError("CV_API_KEY missing")
-
+#get request for api pulls
+#returns JSON from api
 def _get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     _assert_key()
     url = f"{CV_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
@@ -32,12 +34,12 @@ def _get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if data.get("status_code") != 1:  # success per ComicVine
         raise CVError(f"ComicVine error: {data.get('error') or data}")
     return data
-
+#pulls list of comics from api within a set range of dates (ie. 8/5-8/12)
 def fetch_issues_by_date_range(
     start_iso: str,
     end_iso: str,
     *,
-    date_field: str,   # "store_date" or "cover_date"
+    date_field: str,  
     limit: int = 100,
     offset: int = 0,
 ) -> Dict[str, Any]:
@@ -61,7 +63,8 @@ def fetch_issues_by_date_range(
         "offset": offset,
     }
     return _get("/issues/", params)
-
+#this function was created with the help of AI. 
+#the function allows for pulling volumes (completed stories instead of single issues)
 def fetch_volumes_by_ids(ids: List[int]) -> Dict[int, Dict[str, Any]]:
     """
     Return {volume_id: {'publisher': {'name': 'Marvel'}}}
@@ -91,6 +94,5 @@ def fetch_volumes_by_ids(ids: List[int]) -> Dict[int, Dict[str, Any]]:
             vid = v.get("id")
             if isinstance(vid, int):
                 out[vid] = v
-        # brief politeness delay
         time.sleep(0.15)
     return out

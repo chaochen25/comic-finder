@@ -1,12 +1,11 @@
-# backend/app/models.py
+#models.py
 from __future__ import annotations
 from datetime import date
 from typing import Optional
 from sqlmodel import Field, SQLModel
-
+#pulling database models for comics
 class Comic(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    # We reuse marvel_id as a generic external id (ComicVine issue id)
     marvel_id: Optional[int] = Field(index=True, unique=True, default=None)
 
     title: str

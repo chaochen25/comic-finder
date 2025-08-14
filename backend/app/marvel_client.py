@@ -1,4 +1,8 @@
-# backend/app/marvel_client.py
+#marvel_client.py
+# **IMPORTANT: marvel client was the original plan for this project
+#but Marvel's API is currently down while the project was underway. 
+#ComicVine is used in place of Marvel's API
+#ComicVine client is the same as this, but that is the working verison!
 import hashlib, time, os
 from typing import Dict, Any, Optional
 import requests
@@ -57,7 +61,8 @@ def pick_description(item: Dict[str, Any]) -> Optional[str]:
             return txt.strip()
     return None
 
-def fetch_comics_by_date_range(start_iso: str, end_iso: str, limit: int = 100, offset: int = 0, include_collections: bool = False) -> Dict[str, Any]:
+def fetch_comics_by_date_range(start_iso: str, end_iso: str, limit: int = 100, 
+                               offset: int = 0, include_collections: bool = False) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "dateRange": f"{start_iso},{end_iso}",
         "orderBy": "onsaleDate",

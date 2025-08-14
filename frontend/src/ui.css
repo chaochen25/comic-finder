@@ -1,4 +1,4 @@
-/* frontend/src/ui.css — simple light theme reset and UI polish */
+/* Color scheme for webpage */
 :root { color-scheme: light; }
 
 html, body, #root {
@@ -28,7 +28,7 @@ button {
 }
 button:hover { background: #f3f3f3; }
 
-/* Generic card look (use with className="card") */
+/* Generic card */
 .card {
   background: #ffffff;
   color: #111111;

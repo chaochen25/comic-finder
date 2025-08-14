@@ -1,6 +1,7 @@
-# Marvel Comic Release Tracker (MVP)
+# Marvel Comic Release Tracker 
 
-Browse Marvel releases by week (Wed→Tue), search titles, and view details with cover art.
+A full-stack web application to browse and search upcoming and recent Marvel comic book releases, displayed in a weekly grid format.  
+Data is fetched from the ComicVine API and stored locally for fast browsing. The project was supposed to use Marvel's API, but currently it is down. 
 
 ## Features
 - Pick a **Wednesday** to see that week’s releases
@@ -14,18 +15,29 @@ Browse Marvel releases by week (Wed→Tue), search titles, and view details with
 - **Backend**: FastAPI (Python), SQLModel, SQLite
 - **API**: Marvel (server-side; keys never exposed to browser)
 
+## Demo Video
+[Download Demo Video](assets/demo.mov)
+
+
 ## Local Setup (this project was done on mac)
-```bash
-# Backend
+
+# Clone Repo
+git clone https://github.com/YOUR-USERNAME/comic-finder.git
+cd comic-finder
+
+# Backend (Terminal A)
 cd backend
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt || pip install fastapi "uvicorn[standard]" sqlmodel pydantic python-dotenv requests
 uvicorn app.main:app --reload --port 8000  # http://127.0.0.1:8000/docs
 
-# Frontend
+# Frontend (Terminal B)
 cd ../frontend
 # (optional) nvm use will read .nvmrc
 nvm use 22
 npm install
 npm run dev  # http://localhost:5173
+
+# Backend (Terminal C)
+curl -X POST "http://127.0.0.1:8000/api/cv/sync?start=2025-06-01&end=2025-12-31"

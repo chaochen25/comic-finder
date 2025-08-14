@@ -1,9 +1,10 @@
+//get helper func
 export async function apiGet(path) {
   const res = await fetch(path)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
-
+//these functions check for health, search, etc. 
 export const getHealth = () => apiGet('/api/health')
 export const searchComics = (q) => apiGet(`/api/comics/search?q=${encodeURIComponent(q)}`)
 export const getComicsByWeek = (isoWed) => apiGet(`/api/comics/week?wed=${isoWed}`)

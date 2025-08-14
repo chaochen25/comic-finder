@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-// --- Small date helpers ------------------------------------------------------
+//helper functions
 const pad = (n) => String(n).padStart(2, "0");
 const fmtISO = (d) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -20,7 +20,7 @@ function addDays(d, n) {
   return x;
 }
 
-// --- Reusable UI bits --------------------------------------------------------
+// UI
 function Spinner() {
   return (
     <div className="spinner">
@@ -53,7 +53,7 @@ function Modal({ open, onClose, title, children }) {
   );
 }
 
-// --- Main App ----------------------------------------------------------------
+// Main functioning app
 export default function App() {
   // Query/search
   const [q, setQ] = useState("");
@@ -213,6 +213,7 @@ export default function App() {
   }, [wed]);
 
   return (
+    // This JavaScript XML is created with the help of AI
     <div className="container">
       <header className="toolbar">
         <div className="brand">Comic Finder</div>

@@ -1,8 +1,10 @@
+#seed.py
 from datetime import date
 from sqlmodel import Session, select
 from .db import engine, init_db
 from .models import Comic
 
+#this sample was used for testing when API wasnt implemented yet
 def run():
     print("Starting seed...")
     init_db()

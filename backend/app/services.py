@@ -1,4 +1,4 @@
-# backend/app/services.py
+#services.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import date
@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from .db import engine
 from .models import Comic
 from .comicvine_client import fetch_issues_by_date_range, fetch_volumes_by_ids, CVError
-
+#convert date (ie. 2025-09-06) into date obj
 def _safe_date(s: Optional[str]) -> Optional[date]:
     if not s:
         return None
@@ -16,7 +16,7 @@ def _safe_date(s: Optional[str]) -> Optional[date]:
         return date(y, m, d)
     except Exception:
         return None
-
+#gets the comic name and issue #
 def _best_title(issue: Dict[str, Any]) -> str:
     vol_name = (issue.get("volume") or {}).get("name")
     name = issue.get("name")
@@ -28,7 +28,7 @@ def _best_title(issue: Dict[str, Any]) -> str:
         except Exception:
             return f"{vol_name} #{num}"
     return name or "Untitled"
-
+#pulls comic cover
 def _best_thumb(issue: Dict[str, Any]) -> Optional[str]:
     img = issue.get("image") or {}
     return (
@@ -38,7 +38,7 @@ def _best_thumb(issue: Dict[str, Any]) -> Optional[str]:
         or img.get("medium_url")
         or img.get("super_url")
     )
-
+#pulls description of comic
 def _best_description(issue: Dict[str, Any]) -> Optional[str]:
     desc = issue.get("description")
     if isinstance(desc, str) and desc.strip():
@@ -47,7 +47,7 @@ def _best_description(issue: Dict[str, Any]) -> Optional[str]:
     if isinstance(deck, str) and deck.strip():
         return deck.strip()
     return None
-
+#convert JSON into Model 
 def _map_cv_issue_to_comic(issue: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     ext_id = issue.get("id")
     doc: Dict[str, Any] = {
@@ -61,7 +61,8 @@ def _map_cv_issue_to_comic(issue: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
         "marvel_id": ext_id,
     }
     return doc, ext_id
-
+#This func was created with the help of AI
+#sync database to only marvel comics since the api didnt only pull from Marvel
 def _sync_one_field(start_iso: str, end_iso: str, *, date_field: str) -> Tuple[int, int]:
     inserted = updated = 0
     offset = 0
@@ -90,7 +91,6 @@ def _sync_one_field(start_iso: str, end_iso: str, *, date_field: str) -> Tuple[i
                     publisher = vinfo.get("publisher") or {}
                     pub_name = (publisher.get("name") or "").strip()
 
-                # Only keep Marvel
                 if "marvel" not in pub_name.lower():
                     continue
 
@@ -114,11 +114,11 @@ def _sync_one_field(start_iso: str, end_iso: str, *, date_field: str) -> Tuple[i
             if offset >= total:
                 break
     return inserted, updated
-
+#sync store and cover dates
 def cv_sync_range_to_db(
     start_iso: str,
     end_iso: str,
-    include_collections: bool = False,  # not used in CV flow
+    include_collections: bool = False, 
 ) -> Tuple[int, int]:
     """
     Two passes:
@@ -130,6 +130,8 @@ def cv_sync_range_to_db(
     return ins1 + ins2, upd1 + upd2
 
 # Back-compat adapter (old "marvel" name)
+#since the original plan was to use Marvel's own API, I added this in case I wanted to try again
+#with that API. 
 def sync_range_to_db(
     start_iso: str, end_iso: str, include_collections: bool = False
 ) -> Tuple[int, int]:

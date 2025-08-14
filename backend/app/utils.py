@@ -1,8 +1,10 @@
 # backend/app/utils.py
+#this classed was created with the help of AI
+#it helps parse date data from obj to string, check for empty data, etc
 from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
-
+#parse date obj
 def parse_ymd(s: Optional[str]) -> Optional[date]:
     if not s:
         return None
@@ -20,10 +22,7 @@ def week_window_from_wed(wed_s: str) -> Tuple[date, date]:
     w = parse_ymd(wed_s)
     if not w:
         raise ValueError("Invalid date: Use YYYY-MM-DD")
-    # If not a Wednesday (2 = Wednesday? No: Mon=0, Tue=1, Wed=2)
-    # Python: Monday=0 ... Sunday=6
     if w.weekday() != 2:
-        # snap back to the most recent Wednesday before/at this date
         delta = (w.weekday() - 2) % 7
         w = w - timedelta(days=delta)
     start = w
