@@ -22,7 +22,7 @@ Data is fetched from the ComicVine API and stored locally for fast browsing. The
 ## Local Setup (this project was done on mac)
 
 # Clone Repo
-git clone https://github.com/YOUR-USERNAME/comic-finder.git
+git clone https://github.com/chaochen25/comic-finder.git
 cd comic-finder
 
 # Backend (Terminal A)
