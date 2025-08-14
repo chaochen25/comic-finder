@@ -1,338 +1,370 @@
-// frontend/src/App.jsx
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from "react";
 
-/** Basic fetch helpers for the FastAPI backend */
-async function apiGet(path) {
-  const res = await fetch(path)
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 140)}` : ''}`)
-  }
-  return res.json()
+// --- Small date helpers ------------------------------------------------------
+const pad = (n) => String(n).padStart(2, "0");
+const fmtISO = (d) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+function startOfWeekWed(d) {
+  // Normalize to the Wednesday of the week that contains d (Wed..Tue window)
+  const dd = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dow = dd.getDay(); // 0 Sun .. 6 Sat
+  // Distance from current day to Wednesday (3)
+  const delta = (dow <= 3 ? -(3 - dow) : 7 - (dow - 3));
+  dd.setDate(dd.getDate() + delta);
+  return dd;
 }
-async function apiPost(path) {
-  const res = await fetch(path, { method: 'POST' })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 140)}` : ''}`)
-  }
-  return res.json().catch(() => ({}))
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
 }
 
-/** Utils */
-function ymd(d) {
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd}`
+// --- Reusable UI bits --------------------------------------------------------
+function Spinner() {
+  return (
+    <div className="spinner">
+      <div />
+      <div />
+      <div />
+    </div>
+  );
 }
-function toWednesday(d) {
-  const copy = new Date(d)
-  const delta = (3 - copy.getDay() + 7) % 7 // 3 = Wed
-  copy.setDate(copy.getDate() + delta)
-  return copy
-}
-function niceLabel(d) {
-  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
-}
-function wednesdayOptions(selected) {
-  const base = toWednesday(selected ?? new Date())
-  const out = []
-  for (let i = -4; i <= 7; i++) {
-    const d = new Date(base)
-    d.setDate(d.getDate() + i * 7)
-    out.push({ value: ymd(d), label: niceLabel(d) })
-  }
-  return out
-}
-const stripHtml = (html) =>
-  typeof html === 'string' ? html.replace(/<[^>]*>/g, '').trim() : ''
 
+function Modal({ open, onClose, title, children }) {
+  if (!open) return null;
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-card"
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div className="modal-header">
+          <h3>{title}</h3>
+          <button className="btn btn-sm" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// --- Main App ----------------------------------------------------------------
 export default function App() {
-  const [q, setQ] = useState('')
-  const [selectedWed, setSelectedWed] = useState(() => ymd(toWednesday(new Date())))
-  const [results, setResults] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(null) // modal comic
+  // Query/search
+  const [q, setQ] = useState("");
+  const [mode, setMode] = useState("week"); // "week" | "search"
 
-  // pagination
-  const [page, setPage] = useState(1)
-  const ITEMS_PER_PAGE = 12
-  const pageCount = Math.max(1, Math.ceil(results.length / ITEMS_PER_PAGE))
-  const paginatedResults = useMemo(() => {
-    const start = (page - 1) * ITEMS_PER_PAGE
-    return results.slice(start, start + ITEMS_PER_PAGE)
-  }, [results, page])
+  // Week navigation & paging
+  const [wed, setWed] = useState(() => startOfWeekWed(new Date()));
+  const [page, setPage] = useState(1); // 1-based
+  const [pageSize] = useState(25); // show 5x5 per page
+  const [total, setTotal] = useState(0);
 
-  const wedOptions = useMemo(() => wednesdayOptions(new Date(selectedWed)), [selectedWed])
+  // Data & UI state
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [selected, setSelected] = useState(null); // comic for modal
 
-  // Reset page to 1 any time the result set changes
-  useEffect(() => { setPage(1) }, [results])
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(total / pageSize)),
+    [total, pageSize]
+  );
 
+  // Build a safe URL helper (prevents “Invalid URL” errors)
+  const api = (path, params = {}) => {
+    const base = "/api";
+    const url = new URL(base + path, window.location.origin);
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") {
+        url.searchParams.set(k, String(v));
+      }
+    });
+    return url.toString();
+  };
+
+  // Fetch (week)
+  const fetchWeek = async (w, p = 1) => {
+    setLoading(true);
+    setErr("");
+    try {
+      const res = await fetch(
+        api("/comics/week", {
+          wed: fmtISO(w),
+          page: p,
+          limit: pageSize,
+        })
+      );
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(`HTTP ${res.status}${t ? ` — ${t}` : ""}`);
+      }
+      const data = await res.json();
+      setRows(data.items || data); // backend returns {items, total}? support both
+      setTotal(Number(data.total ?? data.length ?? 0));
+    } catch (e) {
+      setErr(String(e.message || e));
+      setRows([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch (search)
+  const fetchSearch = async (term, p = 1) => {
+    setLoading(true);
+    setErr("");
+    try {
+      const clean = (term || "").trim();
+      if (clean.length < 2) {
+        // Don’t hit backend with empty/1-char -> avoids 422
+        setRows([]);
+        setTotal(0);
+        setErr("Type at least 2 characters to search.");
+      } else {
+        const res = await fetch(
+          api("/comics/search", {
+            q: clean, // URL helper encodes
+            page: p,
+            limit: pageSize,
+          })
+        );
+        if (!res.ok) {
+          const t = await res.text();
+          throw new Error(`HTTP ${res.status}${t ? ` — ${t}` : ""}`);
+        }
+        const data = await res.json();
+        setRows(data.items || data);
+        setTotal(Number(data.total ?? data.length ?? 0));
+      }
+    } catch (e) {
+      setErr(String(e.message || e));
+      setRows([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Initial load
   useEffect(() => {
-    let cancelled = false
-    async function run() {
-      setLoading(true)
-      setError('')
-      try {
-        const data = await apiGet(`/api/comics/week?wed=${selectedWed}`)
-        if (!cancelled) setResults(data || [])
-      } catch (e) {
-        if (!cancelled) setError(e.message || 'Failed to load comics')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+    setMode("week");
+    setPage(1);
+    fetchWeek(wed, 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When mode/page/wed/q changes, refetch
+  useEffect(() => {
+    if (mode === "week") {
+      fetchWeek(wed, page);
+    } else {
+      fetchSearch(q, page);
     }
-    run()
-    return () => { cancelled = true }
-  }, [selectedWed])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, page, wed]);
 
-  async function doSearch(ev) {
-    ev?.preventDefault?.()
-    setError('')
-    setLoading(true)
-    try {
-      const term = q.trim()
-      if (!term) {
-        const data = await apiGet(`/api/comics/week?wed=${selectedWed}`)
-        setResults(data || [])
-        return
-      }
-      const data = await apiGet(`/api/comics/search?q=${encodeURIComponent(term)}`)
-      setResults(data || [])
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
-      setPage(1)
-    }
-  }
+  // UI handlers
+  const goPrevWeek = () => {
+    const n = addDays(wed, -7);
+    setWed(n);
+    setMode("week");
+    setPage(1);
+  };
+  const goNextWeek = () => {
+    const n = addDays(wed, +7);
+    setWed(n);
+    setMode("week");
+    setPage(1);
+  };
+  const onSearch = (e) => {
+    e.preventDefault();
+    setMode("search");
+    setPage(1);
+    fetchSearch(q, 1);
+  };
+  const clearSearch = () => {
+    setQ("");
+    setMode("week");
+    setPage(1);
+    fetchWeek(wed, 1);
+  };
 
-  async function syncCurrentMonth() {
-    setError('')
-    setLoading(true)
-    try {
-      const d = new Date(selectedWed)
-      const start = new Date(d.getFullYear(), d.getMonth(), 1)
-      const end = new Date(d.getFullYear(), d.getMonth() + 1, 0)
-      const startStr = ymd(start)
-      const endStr = ymd(end)
-
-      // ComicVine sync
-      const summary = await apiPost(`/api/cv/sync?start=${startStr}&end=${endStr}`)
-
-      // Refresh week
-      const week = await apiGet(`/api/comics/week?wed=${selectedWed}`)
-      setResults(week || [])
-      setPage(1)
-
-      if (summary && (summary.inserted !== undefined || summary.updated !== undefined)) {
-        alert(`Synced ${startStr}..${endStr}\nInserted: ${summary.inserted ?? 0}\nUpdated: ${summary.updated ?? 0}`)
-      }
-    } catch (e) {
-      setError(e.message || 'Sync failed')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function openModal(c) {
-    setActive(c)
-    setOpen(true)
-  }
-  function closeModal() {
-    setOpen(false)
-    setActive(null)
-  }
+  // Format helpers
+  const weekLabel = useMemo(() => {
+    const end = addDays(wed, 6);
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).formatRange?.(wed, end)
+      ? new Intl.DateTimeFormat(undefined, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }).formatRange(wed, end)
+      : `${wed.toDateString()} – ${end.toDateString()}`;
+  }, [wed]);
 
   return (
-    <div style={{ fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif', padding: 20, maxWidth: 1100, margin: '0 auto' }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, margin: 0 }}>Comic Finder</h1>
-        <span style={{ opacity: 0.6 }}>•</span>
-        <span style={{ opacity: 0.8 }}>Backend: ComicVine</span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-          <button
-            onClick={syncCurrentMonth}
-            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#f7f7f7', cursor: 'pointer' }}
-            title="Pull covers & descriptions for this month"
-          >
-            Sync current month
+    <div className="container">
+      <header className="toolbar">
+        <div className="brand">Comic Finder</div>
+
+        <form className="searchbar" onSubmit={onSearch}>
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search by title (e.g., Daredevil)"
+            aria-label="Search by title"
+          />
+          <button className="btn" type="submit">
+            Search
+          </button>
+          {mode === "search" && (
+            <button type="button" className="btn ghost" onClick={clearSearch}>
+              Clear
+            </button>
+          )}
+        </form>
+
+        <div className="weeknav">
+          <button className="btn" onClick={goPrevWeek} title="Previous week">
+            ←
+          </button>
+          <div className="weeklabel">
+            {mode === "week" ? `Week: ${weekLabel}` : "Search results"}
+          </div>
+          <button className="btn" onClick={goNextWeek} title="Next week">
+            →
           </button>
         </div>
       </header>
 
-      {/* Controls */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-        {/* Search */}
-        <form onSubmit={doSearch} style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="text"
-            placeholder="Search by title (e.g., Avengers)"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc' }}
-          />
-          <button type="submit" style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}>
-            Search
-          </button>
-        </form>
-
-        {/* Wednesday picker */}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <select
-            value={selectedWed}
-            onChange={(e) => setSelectedWed(e.target.value)}
-            style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #ccc' }}
-            aria-label="Pick a Wednesday"
-          >
-            {wedOptions.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-          <button
-            onClick={() => setSelectedWed(ymd(new Date(new Date(selectedWed).getTime() - 7 * 24 * 3600 * 1000)))}
-            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}
-            title="Previous week"
-          >
-            ⟵
-          </button>
-          <button
-            onClick={() => setSelectedWed(ymd(new Date(new Date(selectedWed).getTime() + 7 * 24 * 3600 * 1000)))}
-            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}
-            title="Next week"
-          >
-            ⟶
-          </button>
+      {/* Error + loading */}
+      {err && (
+        <div className="alert">
+          {mode === "search" && q
+            ? `Search results for “${q}” — ${err}`
+            : `Error — ${err}`}
         </div>
-      </div>
-
-      {/* Status */}
-      {loading && <div style={{ marginBottom: 12, color: '#555' }}>Loading…</div>}
-      {error && <div style={{ marginBottom: 12, color: '#b00020' }}>Error: {error}</div>}
-
-      {/* Results grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12, minHeight: 200 }}>
-        {paginatedResults.map((c) => (
-          <button
-            key={c.id}
-            onClick={() => openModal(c)}
-            style={{
-              textAlign: 'left',
-              display: 'grid',
-              gridTemplateColumns: '80px 1fr',
-              gap: 12,
-              padding: 12,
-              borderRadius: 12,
-              border: '1px solid #e5e7eb',
-              background: '#fff',
-              cursor: 'pointer',
-            }}
-          >
-            {c.thumbnail_url ? (
-              <img
-                src={c.thumbnail_url}
-                alt={`${c.title} cover`}
-                width={80}
-                height={120}
-                style={{ borderRadius: 8, objectFit: 'cover' }}
-                onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
-              />
-            ) : (
-              <div style={{ width: 80, height: 120, background: '#eee', borderRadius: 8 }} />
-            )}
-
-            <div style={{ display: 'grid', gap: 6 }}>
-              <div style={{ fontWeight: 600 }}>{c.title || 'Untitled'}</div>
-              <div style={{ fontSize: 12, color: '#555' }}>
-                {c.onsale_date ? `On sale: ${c.onsale_date}` : 'On sale: —'}
-              </div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
-                {c.format || 'Comic'}
-              </div>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Pagination controls */}
-      <div style={{ display: 'flex', justifyContent: 'center', gap: 6, marginTop: 16 }}>
-        {Array.from({ length: pageCount }, (_, i) => {
-          const p = i + 1
-          const active = p === page
-          return (
-            <button
-              key={p}
-              onClick={() => setPage(p)}
-              style={{
-                padding: '8px 12px',
-                borderRadius: 8,
-                border: `1px solid ${active ? '#7c3aed' : '#ddd'}`,
-                background: active ? '#f5f3ff' : '#fafafa',
-                cursor: 'pointer',
-                fontWeight: active ? 600 : 400
-              }}
-              aria-current={active ? 'page' : undefined}
-            >
-              {p}
-            </button>
-          )
-        })}
-      </div>
-
-      {/* Modal */}
-      {open && active && (
-        <div
-          onClick={closeModal}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 50
-          }}
-          aria-modal="true"
-          role="dialog"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{ background: '#fff', borderRadius: 12, maxWidth: 720, width: '100%', padding: 20, boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
-          >
-            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 16 }}>
-              {active.thumbnail_url ? (
-                <img
-                  src={active.thumbnail_url}
-                  alt={`${active.title} cover`}
-                  width={120}
-                  height={180}
-                  style={{ borderRadius: 8, objectFit: 'cover' }}
-                />
-              ) : (
-                <div style={{ width: 120, height: 180, background: '#eee', borderRadius: 8 }} />
-              )}
-
-              <div>
-                <h2 style={{ margin: '0 0 6px' }}>{active.title || 'Untitled'}</h2>
-                <div style={{ fontSize: 14, color: '#555', marginBottom: 12 }}>
-                  {active.onsale_date ? `On sale: ${active.onsale_date}` : ''} {active.format ? `• ${active.format}` : ''}
-                </div>
-                <p style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
-                  {stripHtml(active.description) || 'No description provided.'}
-                </p>
-              </div>
-            </div>
-
-            <div style={{ textAlign: 'right', marginTop: 16 }}>
-              <button onClick={closeModal} style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #ddd', background: '#fafafa', cursor: 'pointer' }}>
-                Close
-              </button>
-            </div>
-          </div>
+      )}
+      {loading && (
+        <div className="loading">
+          <Spinner />
+          <span>Loading…</span>
         </div>
       )}
 
-      <footer style={{ marginTop: 24, fontSize: 12, color: '#6b7280' }}>
-        Tip: If a week looks empty, click <b>Sync current month</b> first, then re‑select your Wednesday.
-      </footer>
+      {/* Grid */}
+      {!loading && rows.length === 0 && !err && (
+        <div className="empty">No results.</div>
+      )}
+
+      <div className="grid">
+        {rows.map((c) => (
+          <article
+            key={c.id}
+            className="card"
+            onClick={() => setSelected(c)}
+            title={c.title}
+            role="button"
+          >
+            <div className="thumbwrap">
+              {c.thumbnail_url ? (
+                <img
+                  src={c.thumbnail_url}
+                  alt={c.title}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <div className="thumb placeholder">No image</div>
+              )}
+            </div>
+            <h4 className="title" title={c.title}>
+              {c.title}
+            </h4>
+            <div className="meta">
+              <span>
+                {c.onsale_date
+                  ? new Date(c.onsale_date).toLocaleDateString()
+                  : "—"}
+              </span>
+              <span>·</span>
+              <span>{c.format || "Comic"}</span>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      {/* Pagination (5×5 per page) */}
+      {totalPages > 1 && (
+        <nav className="pager">
+          <button
+            className="btn"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >
+            Prev
+          </button>
+          <span className="pageinfo">
+            Page {page} / {totalPages}
+          </span>
+          <button
+            className="btn"
+            disabled={page >= totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+          >
+            Next
+          </button>
+        </nav>
+      )}
+
+      {/* Modal for details */}
+      <Modal
+        open={!!selected}
+        onClose={() => setSelected(null)}
+        title={selected?.title || ""}
+      >
+        <div className="detail">
+          <div className="detail-thumb">
+            {selected?.thumbnail_url ? (
+              <img
+                src={selected.thumbnail_url}
+                alt={selected.title}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="thumb placeholder">No image</div>
+            )}
+          </div>
+          <div className="detail-text">
+            <div className="detail-meta">
+              {selected?.onsale_date
+                ? new Date(selected.onsale_date).toLocaleDateString()
+                : "—"}{" "}
+              • {selected?.format || "Comic"}
+            </div>
+            <div
+              className="detail-desc"
+              // Backend sends HTML (ComicVine). Safe-ish for this controlled demo.
+              dangerouslySetInnerHTML={{
+                __html:
+                  selected?.description ||
+                  "<em>No description provided.</em>",
+              }}
+            />
+          </div>
+        </div>
+      </Modal>
     </div>
-  )
+  );
 }

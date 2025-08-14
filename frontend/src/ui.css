@@ -1,0 +1,42 @@
+/* frontend/src/ui.css — simple light theme reset and UI polish */
+:root { color-scheme: light; }
+
+html, body, #root {
+  background: #ffffff;
+  color: #111111;
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Inputs & selects */
+input, select {
+  background: #ffffff;
+  color: #111111;
+  border: 1px solid #cccccc;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
+/* Buttons */
+button {
+  background: #fafafa;
+  color: #111111;
+  border: 1px solid #dddddd;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+button:hover { background: #f3f3f3; }
+
+/* Generic card look (use with className="card") */
+.card {
+  background: #ffffff;
+  color: #111111;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+/* Utilities */
+.muted { color: #555; }
+.subtle { color: #6b7280; }
+.modal-backdrop { background: rgba(0,0,0,0.35); }

@@ -1,12 +1,14 @@
-"""
-Creates a SQLModel database and the helper to create tables
-"""
+# backend/app/db.py
+from __future__ import annotations
 from sqlmodel import SQLModel, create_engine
 from .config import DATABASE_URL
 
-# lets you see SQL queries in the terminal while developing
-engine = create_engine(DATABASE_URL, echo=True)
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 def init_db() -> None:
-    # create database tables if they don't already exist
+    from .models import Comic  # ensure models are imported
     SQLModel.metadata.create_all(engine)

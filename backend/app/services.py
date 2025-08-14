@@ -1,10 +1,12 @@
-# backend/app/services.py (additions for ComicVine)
-from typing import Tuple, Optional, List, Dict, Any
+# backend/app/services.py
+from __future__ import annotations
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import date
+
 from sqlmodel import Session, select
 from .db import engine
 from .models import Comic
-from .comicvine_client import fetch_issues_by_date_range, fetch_volumes_by_ids
+from .comicvine_client import fetch_issues_by_date_range, fetch_volumes_by_ids, CVError
 
 def _safe_date(s: Optional[str]) -> Optional[date]:
     if not s:
@@ -15,31 +17,29 @@ def _safe_date(s: Optional[str]) -> Optional[date]:
     except Exception:
         return None
 
-def _first_writer_name(issue: Dict[str, Any]) -> Optional[str]:
-    """
-    ComicVine person_credits isn’t returned unless requested; we didn’t include it to keep payloads small.
-    You can enhance this later by adding person_credits to field_list and scanning for role 'writer'.
-    """
-    return None
-
 def _best_title(issue: Dict[str, Any]) -> str:
-    vol = (issue.get("volume") or {}).get("name")
+    vol_name = (issue.get("volume") or {}).get("name")
     name = issue.get("name")
     num = issue.get("issue_number")
-    if vol and num not in (None, ""):
+    if vol_name and num not in (None, ""):
         try:
             n = int(float(str(num)))
-            return f"{vol} #{n}"
+            return f"{vol_name} #{n}"
         except Exception:
-            return f"{vol} #{num}"
+            return f"{vol_name} #{num}"
     return name or "Untitled"
 
 def _best_thumb(issue: Dict[str, Any]) -> Optional[str]:
     img = issue.get("image") or {}
-    return img.get("small_url") or img.get("thumb_url") or img.get("icon_url") or img.get("medium_url") or img.get("super_url")
+    return (
+        img.get("small_url")
+        or img.get("thumb_url")
+        or img.get("icon_url")
+        or img.get("medium_url")
+        or img.get("super_url")
+    )
 
 def _best_description(issue: Dict[str, Any]) -> Optional[str]:
-    # prefer long description, fallback to short deck
     desc = issue.get("description")
     if isinstance(desc, str) and desc.strip():
         return desc.strip()
@@ -49,55 +49,58 @@ def _best_description(issue: Dict[str, Any]) -> Optional[str]:
     return None
 
 def _map_cv_issue_to_comic(issue: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    ext_id = issue.get("id")  # ComicVine issue id
-    doc = {
+    ext_id = issue.get("id")
+    doc: Dict[str, Any] = {
         "title": _best_title(issue),
-        "author": _first_writer_name(issue),
-        "onsale_date": _safe_date(issue.get("cover_date") or issue.get("store_date")),
+        "author": None,  # per your demo request
+        "onsale_date": _safe_date(issue.get("store_date") or issue.get("cover_date")),
         "format": "Comic",
         "thumbnail_url": _best_thumb(issue),
         "description": _best_description(issue),
         "issue_number": issue.get("issue_number"),
-        "marvel_id": ext_id,  # reuse as external_id
+        "marvel_id": ext_id,
     }
     return doc, ext_id
 
-def cv_sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool = False) -> Tuple[int, int]:
-    """
-    Pull issues from ComicVine for [start_iso, end_iso], filter to Marvel publisher,
-    and upsert into our Comic table by external id.
-    """
+def _sync_one_field(start_iso: str, end_iso: str, *, date_field: str) -> Tuple[int, int]:
     inserted = updated = 0
     offset = 0
-    limit = 100
-
+    LIMIT = 100
     with Session(engine) as session:
         while True:
-            payload = fetch_issues_by_date_range(start_iso, end_iso, limit=limit, offset=offset)
+            payload = fetch_issues_by_date_range(
+                start_iso, end_iso, date_field=date_field, limit=LIMIT, offset=offset
+            )
             results: List[Dict[str, Any]] = payload.get("results", [])
             total = payload.get("number_of_total_results", 0)
 
-            # Map volume_id -> publisher so we can filter to Marvel only
-            vol_ids = [ (it.get("volume") or {}).get("id") for it in results if (it.get("volume") or {}).get("id") ]
-            vol_ids = list(dict.fromkeys(vol_ids))  # unique, keep order
+            vol_ids = [
+                (it.get("volume") or {}).get("id")
+                for it in results
+                if (it.get("volume") or {}).get("id")
+            ]
+            vol_ids = list(dict.fromkeys(vol_ids))
             vol_map = fetch_volumes_by_ids(vol_ids) if vol_ids else {}
 
             for issue in results:
-                vol = issue.get("volume") or {}
-                vol_pub_name = None
-                vol_info = vol_map.get(vol.get("id"))
-                if vol_info and isinstance(vol_info.get("publisher"), dict):
-                    vol_pub_name = (vol_info["publisher"].get("name") or "").strip()
+                vol_id = (issue.get("volume") or {}).get("id")
+                pub_name = ""
+                if vol_id is not None:
+                    vinfo = vol_map.get(vol_id) or {}
+                    publisher = vinfo.get("publisher") or {}
+                    pub_name = (publisher.get("name") or "").strip()
 
-                # Keep only Marvel
-                if vol_pub_name and vol_pub_name.lower() != "marvel":
+                # Only keep Marvel
+                if "marvel" not in pub_name.lower():
                     continue
 
                 doc, ext_id = _map_cv_issue_to_comic(issue)
                 if not ext_id:
                     continue
 
-                existing = session.exec(select(Comic).where(Comic.marvel_id == ext_id)).first()
+                existing = session.exec(
+                    select(Comic).where(Comic.marvel_id == ext_id)
+                ).first()
                 if existing:
                     for k, v in doc.items():
                         setattr(existing, k, v)
@@ -107,18 +110,27 @@ def cv_sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool 
                     inserted += 1
 
             session.commit()
-            offset += limit
+            offset += LIMIT
             if offset >= total:
                 break
-
     return inserted, updated
 
-# --- compatibility shim (Marvel -> ComicVine) ---
-def sync_range_to_db(start_iso: str, end_iso: str, include_collections: bool = False):
+def cv_sync_range_to_db(
+    start_iso: str,
+    end_iso: str,
+    include_collections: bool = False,  # not used in CV flow
+) -> Tuple[int, int]:
     """
-    Backward-compat shim so old imports keep working.
-    Routes should prefer /api/cv/sync (cv_sync_range_to_db), but this
-    lets /api/marvel/sync keep functioning if it's still referenced.
+    Two passes:
+        1) store_date   (real on-sale)
+        2) cover_date   (fallback)
     """
-    return cv_sync_range_to_db(start_iso, end_iso, include_collections=include_collections)
+    ins1, upd1 = _sync_one_field(start_iso, end_iso, date_field="store_date")
+    ins2, upd2 = _sync_one_field(start_iso, end_iso, date_field="cover_date")
+    return ins1 + ins2, upd1 + upd2
 
+# Back-compat adapter (old "marvel" name)
+def sync_range_to_db(
+    start_iso: str, end_iso: str, include_collections: bool = False
+) -> Tuple[int, int]:
+    return cv_sync_range_to_db(start_iso, end_iso, include_collections=include_collections)

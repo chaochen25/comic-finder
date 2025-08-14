@@ -1,196 +1,143 @@
-"""
-app/main.py
-FastAPI app for the Marvel Comic Release Tracker MVP.
+# backend/app/main.py
+from __future__ import annotations
 
-Endpoints:
-- GET  /api/health
-- GET  /api/comics                          (optional ?start=YYYY-MM-DD&end=YYYY-MM-DD)
-- GET  /api/comics/search?q=term
-- GET  /api/comics/{comic_id}
-- GET  /api/comics/week?wed=YYYY-MM-DD      (Wed..Tue window)
-- POST /api/marvel/sync?start=YYYY-MM-DD&end=YYYY-MM-DD&include_collections=bool
+from datetime import date, datetime, timedelta
+from typing import List, Optional
 
-Notes:
-- Uses robust string parsing for dates to avoid 422 errors in some environments.
-- Keeps private API keys on the server; frontend talks only to these routes.
-"""
-
-from datetime import date, timedelta
-from typing import List, Optional, Tuple
-
-from fastapi import FastAPI, Query, HTTPException, Path
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from .config import MARVEL_PUBLIC_KEY as PUB, MARVEL_PRIVATE_KEY as PRI, MARVEL_BASE_URL as BASE_URL
-from .db import engine, init_db
+
+from .db import engine
 from .models import Comic
-from .services import sync_range_to_db
-from .services import cv_sync_range_to_db 
-from .config import COMICVINE_API_KEY, COMICVINE_BASE_URL
+from .services import cv_sync_range_to_db  # ComicVine-backed sync
 
+app = FastAPI(title="Comic Finder API")
 
-
-# --------------------------- FastAPI app + CORS ---------------------------
-
-app = FastAPI(title="Comic Finder API", version="0.2.0")
-
-# CORS: open in dev so Vite (http://localhost:5173) can call the API.
-# Lock this down to your deployed domain(s) for production.
+# CORS for localhost dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # e.g., ["http://localhost:5173"] for stricter dev
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+
+# ---------- helpers ----------
+
+def _d(iso: str) -> date:
+    try:
+        y, m, d = map(int, iso.split("-"))
+        return date(y, m, d)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"Invalid date: {iso}. Use YYYY-MM-DD")
+
+def _week_window(wed: date) -> tuple[date, date]:
+    # our UI treats a “week” as Wed..Tue
+    start = wed
+    end = wed + timedelta(days=6)
+    return start, end
+
+def _month_window(d: date) -> tuple[date, date]:
+    first = d.replace(day=1)
+    if first.month == 12:
+        next_first = first.replace(year=first.year + 1, month=1, day=1)
+    else:
+        next_first = first.replace(month=first.month + 1, day=1)
+    last = next_first - timedelta(days=1)
+    return first, last
 
 
-# --------------------------- Schemas ---------------------------
+# ---------- models ----------
 
 class ComicOut(BaseModel):
     id: int
-    marvel_id: Optional[int] = None
+    marvel_id: Optional[int]
     title: str
     author: Optional[str] = None
     onsale_date: Optional[date] = None
     format: Optional[str] = None
     thumbnail_url: Optional[str] = None
     description: Optional[str] = None
-    # Marvel sometimes uses float for old issue numbers
-    issue_number: Optional[float] = None
 
     class Config:
-        from_attributes = True  # allow conversion from SQLModel/ORM objects
+        from_attributes = True
 
 
-# --------------------------- Helpers ---------------------------
-
-def _parse_iso_date(s: str) -> date:
-    """Robust YYYY-MM-DD parser that doesn't rely on Pydantic coercion."""
-    try:
-        y, m, d = map(int, s.split("-"))
-        return date(y, m, d)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
-
-def wednesday_week_range(wed: date) -> Tuple[date, date]:
-    """Return the Wed..Tue window for a given Wednesday date."""
-    start = wed
-    end = wed + timedelta(days=6)
-    return start, end
-
-
-# --------------------------- Routes ---------------------------
+# ---------- routes ----------
 
 @app.get("/api/health")
-def health() -> dict:
+def health():
     return {"status": "ok"}
-
 
 @app.get("/api/comics", response_model=List[ComicOut])
 def list_comics(
-    start: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    end: Optional[str] = Query(None, description="YYYY-MM-DD"),
-) -> List[ComicOut]:
-    """
-    List comics, optionally filtering by on-sale date range.
-    Example: /api/comics?start=2025-08-01&end=2025-08-31
-    """
-    start_date: Optional[date] = _parse_iso_date(start) if start else None
-    end_date: Optional[date] = _parse_iso_date(end) if end else None
-
-    with Session(engine) as session:
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    with Session(engine) as s:
         stmt = select(Comic)
-        if start_date:
-            stmt = stmt.where(Comic.onsale_date >= start_date)
-        if end_date:
-            stmt = stmt.where(Comic.onsale_date <= end_date)
-        stmt = stmt.order_by(Comic.onsale_date)
-        return session.exec(stmt).all()
-
-
-@app.get("/api/comics/search", response_model=List[ComicOut])
-def search_comics(q: str = Query(..., min_length=1, description="Search term in title")) -> List[ComicOut]:
-    """
-    Case-insensitive search by title substring.
-    Example: /api/comics/search?q=avengers
-    """
-    with Session(engine) as session:
-        # SQLModel/SQLAlchemy ilike for case-insensitive contains
-        stmt = select(Comic).where(Comic.title.ilike(f"%{q}%")).order_by(Comic.onsale_date)
-        return session.exec(stmt).all()
-
+        if start and end:
+            sd, ed = _d(start), _d(end)
+            stmt = stmt.where(Comic.onsale_date >= sd, Comic.onsale_date <= ed)
+        if q:
+            like = f"%{q}%"
+            stmt = stmt.where(Comic.title.ilike(like))
+        stmt = stmt.order_by(Comic.onsale_date, Comic.title).offset(offset).limit(limit)
+        rows = s.exec(stmt).all()
+        return rows
 
 @app.get("/api/comics/week", response_model=List[ComicOut])
-def comics_by_wednesday(wed: str = Query(..., description="YYYY-MM-DD")) -> List[ComicOut]:
-    """
-    Return comics for the Wed..Tue window containing 'wed' (string 'YYYY-MM-DD').
-    """
-    wed_date = _parse_iso_date(wed)
-    start, end = wednesday_week_range(wed_date)
-    with Session(engine) as session:
-        stmt = (
-            select(Comic)
-            .where(Comic.onsale_date >= start, Comic.onsale_date <= end)
-            .order_by(Comic.onsale_date)
-        )
-        return session.exec(stmt).all()
+def comics_week(wed: str):
+    wed_d = _d(wed)
+    start, end = _week_window(wed_d)
 
-@app.get("/api/comics/{comic_id}", response_model=ComicOut)
-def get_comic(comic_id: int = Path(..., ge=1)) -> ComicOut:
-    with Session(engine) as session:
-        row = session.get(Comic, comic_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Comic not found")
-        return row
+    def _query_week():
+        with Session(engine) as s:
+            stmt = (
+                select(Comic)
+                .where(Comic.onsale_date >= start, Comic.onsale_date <= end)
+                .order_by(Comic.onsale_date, Comic.title)
+            )
+            return s.exec(stmt).all()
 
-@app.post("/api/marvel/sync")
-def marvel_sync(
-    start: str = Query(..., description="YYYY-MM-DD"),
-    end: str = Query(..., description="YYYY-MM-DD"),
-    include_collections: bool = Query(False, description="Include TPBs/omnibi/etc."),
-) -> dict:
-    """
-    Server-side sync from Marvel into our DB (keeps private key secret).
-    Example: POST /api/marvel/sync?start=2025-08-01&end=2025-08-31
-    """
-    start_date = _parse_iso_date(start)
-    end_date = _parse_iso_date(end)
-    if end_date < start_date:
-        raise HTTPException(status_code=400, detail="'end' must be >= 'start'")
+    rows = _query_week()
+    if rows:
+        return rows
 
-    inserted, updated = sync_range_to_db(start_date.isoformat(), end_date.isoformat(), include_collections=include_collections)
-    return {"inserted": inserted, "updated": updated}
+    # Nothing yet? Auto-sync the month containing this Wednesday,
+    # so users can freely browse future/past weeks during the demo.
+    mstart, mend = _month_window(wed_d)
+    try:
+        cv_sync_range_to_db(mstart.isoformat(), mend.isoformat())
+    except Exception as e:
+        # Don’t hard-fail; just return empty if sync blows up.
+        # This keeps the UI responsive even if the external API hiccups.
+        print("Auto-sync failed:", repr(e))
+
+    # Try again
+    return _query_week()
 
 @app.post("/api/cv/sync")
-def cv_sync(
-    start: str = Query(..., description="YYYY-MM-DD"),
-    end: str = Query(..., description="YYYY-MM-DD"),
-    include_collections: bool = Query(False, description="(Ignored for ComicVine issues; kept for parity)"),
-) -> dict:
-    start_date = _parse_iso_date(start)
-    end_date = _parse_iso_date(end)
-    if end_date < start_date:
-        raise HTTPException(status_code=400, detail="'end' must be >= 'start'")
-    inserted, updated = cv_sync_range_to_db(start_date.isoformat(), end_date.isoformat(), include_collections=include_collections)
+def cv_sync(start: str, end: str):
+    sd, ed = _d(start), _d(end)
+    inserted, updated = cv_sync_range_to_db(sd.isoformat(), ed.isoformat())
     return {"inserted": inserted, "updated": updated}
 
-
-@app.get("/api/debug/env")
-def debug_env():
-    def mask(s):
-        if not s: return None
-        s = s.strip()
-        return f"{s[:4]}...{s[-4:]} (len={len(s)})"
-    return {
-        "PUB_present": bool(MARVEL_PUBLIC_KEY),
-        "PRI_present": bool(MARVEL_PRIVATE_KEY),
-        "PUB_masked": mask(MARVEL_PUBLIC_KEY),
-        "PRI_masked": mask(MARVEL_PRIVATE_KEY),
-        "BASE_URL": MARVEL_BASE_URL,
-    }
+@app.get("/api/comics/search", response_model=List[ComicOut])
+def search(q: str, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+    with Session(engine) as s:
+        like = f"%{q.strip()}%"
+        stmt = (
+            select(Comic)
+            .where(Comic.title.ilike(like))
+            .order_by(Comic.onsale_date.desc(), Comic.title)
+            .offset(offset)
+            .limit(limit)
+        )
+        return s.exec(stmt).all()
