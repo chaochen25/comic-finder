@@ -16,7 +16,7 @@ Data is fetched from the ComicVine API and stored locally for fast browsing. The
 - **API**: Marvel (server-side; keys never exposed to browser)
 
 ## Demo Video
-[Download Demo Video](assets/demo.mov)
+[Demo Video](https://youtu.be/1jK7YBFUS5g)
 
 
 ## Local Setup (this project was done on mac)
